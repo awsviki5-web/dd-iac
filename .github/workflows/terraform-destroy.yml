@@ -1,0 +1,59 @@
+name: Terraform Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to destroy (e.g., env/product-a/dev)'
+        required: true
+        type: string
+      confirm:
+        description: 'Type "destroy" to confirm'
+        required: true
+        type: string
+
+env:
+  TF_VERSION: '1.5.7'
+
+jobs:
+  terraform-destroy:
+    name: Destroy - ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'destroy'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure JFrog credentials
+        run: |
+          mkdir -p ~/.terraform.d
+          cat > ~/.terraform.d/credentials.tfrc.json <<EOF
+          {
+            "credentials": {
+              "your-jfrog-instance.jfrog.io": {
+                "username": "${{ secrets.JFROG_USERNAME }}",
+                "password": "${{ secrets.JFROG_PASSWORD }}"
+              }
+            }
+          }
+          EOF
+
+      - name: Terraform Init
+        working-directory: ${{ github.event.inputs.environment }}
+        run: terraform init
+        env:
+          ARTIFACTORY_USERNAME: ${{ secrets.JFROG_USERNAME }}
+          ARTIFACTORY_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
+
+      - name: Terraform Destroy
+        working-directory: ${{ github.event.inputs.environment }}
+        run: terraform destroy -auto-approve
+        env:
+          TF_VAR_datadog_api_key: ${{ secrets.DATADOG_API_KEY }}
+          TF_VAR_datadog_app_key: ${{ secrets.DATADOG_APP_KEY }}
