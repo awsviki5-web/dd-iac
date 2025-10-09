@@ -42,8 +42,12 @@ jobs:
 
       - name: Terraform Init
         working-directory: ${{ github.event.inputs.environment || 'env/product-a/dev' }}
-        run: terraform init
+        run: |
+          set -x
+          terraform init
 
       - name: Terraform Plan
         working-directory: ${{ github.event.inputs.environment || 'env/product-a/dev' }}
-        run: terraform plan -out=tfplan -input=false
+        run: |
+          set -x
+          terraform plan -out=tfplan -input=false
