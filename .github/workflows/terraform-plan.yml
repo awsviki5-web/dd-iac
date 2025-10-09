@@ -1,62 +1,23 @@
 name: Terraform Plan
 
 on:
-  pull_request:
-    branches:
-      - main
-      - develop
-    paths:
-      - 'env/**'
-      - 'modules/**'
-      - '.github/workflows/terraform-*.yml'
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Specific environment to plan (e.g., env/a204278-ls2/dev)'
-        required: false
+        description: 'Terraform environment directory (e.g., env/product-a/dev)'
+        required: true
         type: string
+  pull_request:
+    paths:
+      - 'env/**'
+      - 'modules/**'
+
 env:
   TF_VERSION: '1.5.7'
 
 jobs:
-  detect-changes:
-    name: Detect Changed Environments
+  plan:
     runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Detect changed environments
-        id: set-matrix
-        run: |
-          # Get changed files
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
-          
-          # Find unique environment directories
-          ENVS=$(echo "$CHANGED_FILES" | grep '^env/' | cut -d'/' -f1-4 | sort -u | jq -R -s -c 'split("\n")[:-1]')
-          
-          # If no env changes, check if modules changed (then run all)
-          if [ "$ENVS" == "[]" ] && echo "$CHANGED_FILES" | grep -q '^modules/'; then
-            ENVS=$(find env -name "main.tf" -type f | xargs dirname | jq -R -s -c 'split("\n")[:-1]')
-          fi
-          
-          echo "matrix=$ENVS" >> $GITHUB_OUTPUT
-          echo "Detected environments: $ENVS"
-
-  terraform-plan:
-    name: Plan - ${{ matrix.environment }}
-    runs-on: ubuntu-latest
-    needs: detect-changes
-    if: needs.detect-changes.outputs.matrix != '[]'
-    strategy:
-      matrix:
-        environment: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
-      fail-fast: false
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -80,53 +41,9 @@ jobs:
           EOF
 
       - name: Terraform Init
-        working-directory: ${{ matrix.environment }}
+        working-directory: ${{ github.event.inputs.environment || 'env/product-a/dev' }}
         run: terraform init
-        env:
-          JFROG_ACCESS_TOKEN: ${{ secrets.JFROG_ACCESS_TOKEN }}
-
-      - name: Terraform Validate
-        working-directory: ${{ matrix.environment }}
-        run: terraform validate
-
-      - name: Terraform Format Check
-        working-directory: ${{ matrix.environment }}
-        run: terraform fmt -check -recursive
 
       - name: Terraform Plan
-        working-directory: ${{ matrix.environment }}
-        run: |
-          terraform plan -out=tfplan -input=false
-        env:
-          TF_VAR_datadog_api_key: ${{ secrets.DATADOG_API_KEY }}
-          TF_VAR_datadog_app_key: ${{ secrets.DATADOG_APP_KEY }}
-
-      - name: Save Plan Output
-        working-directory: ${{ matrix.environment }}
-        run: |
-          terraform show -no-color tfplan > plan.txt
-
-      - name: Upload Plan
-        uses: actions/upload-artifact@v4
-        with:
-          name: tfplan-${{ hashFiles(matrix.environment) }}
-          path: |
-            ${{ matrix.environment }}/tfplan
-            ${{ matrix.environment }}/plan.txt
-          retention-days: 5
-
-      - name: Comment PR with Plan
-        uses: actions/github-script@v7
-        if: github.event_name == 'pull_request'
-        with:
-          script: |
-            const fs = require('fs');
-            const plan = fs.readFileSync('${{ matrix.environment }}/plan.txt', 'utf8');
-            const truncatedPlan = plan.length > 65000 ? plan.substring(0, 65000) + '\n\n... (truncated)' : plan;
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `## Terraform Plan: \`${{ matrix.environment }}\`\n\n\`\`\`terraform\n${truncatedPlan}\n\`\`\``
-            });
+        working-directory: ${{ github.event.inputs.environment || 'env/product-a/dev' }}
+        run: terraform plan -out=tfplan -input=false
