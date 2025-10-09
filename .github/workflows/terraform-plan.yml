@@ -44,11 +44,14 @@ jobs:
         working-directory: ${{ github.event.inputs.environment || 'env/204278-ls2/dev' }}
         run: |
           set -x
-          terraform workspace select ${{ github.event.inputs.environment || 'default' }} || terraform workspace new ${{ github.event.inputs.environment || 'default' }}
+          TF_WORKSPACE=$(basename "${{ github.event.inputs.environment || 'env/204278-ls2/dev' }}")
+          terraform workspace select "$TF_WORKSPACE" || terraform workspace new "$TF_WORKSPACE"
           terraform init
 
       - name: Terraform Plan
         working-directory: ${{ github.event.inputs.environment || 'env/204278-ls2/dev' }}
         run: |
           set -x
+          TF_WORKSPACE=$(basename "${{ github.event.inputs.environment || 'env/204278-ls2/dev' }}")
+          terraform workspace select "$TF_WORKSPACE" || terraform workspace new "$TF_WORKSPACE"          
           terraform plan -out=tfplan -input=false
