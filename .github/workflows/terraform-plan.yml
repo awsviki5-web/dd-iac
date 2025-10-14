@@ -14,6 +14,7 @@ on:
 
 env:
   TF_VERSION: '1.5.7'
+  ENVIRONMENT_PATH: ${{ github.event.inputs.environment || 'env/204278-ls2/dev' }}
 
 jobs:
   plan:
@@ -26,6 +27,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false  # Important for capturing output
 
       - name: Configure JFrog credentials
         run: |
@@ -40,25 +42,181 @@ jobs:
           }
           EOF
 
-      - name: Terraform Init
-        working-directory: ${{ github.event.inputs.environment || 'env/204278-ls2/dev' }}
+      - name: Set Terraform Workspace Name
+        id: set-workspace
         run: |
-          set -x
-          TF_WORKSPACE=$(basename "${{ github.event.inputs.environment || 'env/204278-ls2/dev' }}")
-          terraform workspace select "$TF_WORKSPACE" || terraform workspace new "$TF_WORKSPACE"
-          terraform init -reconfigure
+          WORKSPACE_NAME=$(echo "${{ env.ENVIRONMENT_PATH }}" | cut -d'/' -f2- | tr '/' '-')
+          echo "WORKSPACE_NAME=$WORKSPACE_NAME" >> $GITHUB_ENV
+          echo "workspace=$WORKSPACE_NAME" >> $GITHUB_OUTPUT
+          echo "Using workspace: $WORKSPACE_NAME"
+
+      - name: Terraform Init
+        id: init
+        working-directory: ${{ env.ENVIRONMENT_PATH }}
+        run: terraform init -reconfigure
+        continue-on-error: true
 
       - name: Select or Create Terraform Workspace
-        working-directory: ${{ github.event.inputs.environment || 'env/204278-ls2/dev' }}
+        working-directory: ${{ env.ENVIRONMENT_PATH }}
         run: |
-          set -x
-          TF_WORKSPACE=$(basename "${{ github.event.inputs.environment || 'env/204278-ls2/dev' }}")
-          terraform workspace select "$TF_WORKSPACE" || terraform workspace new "$TF_WORKSPACE"
+          terraform workspace select "${{ env.WORKSPACE_NAME }}" || terraform workspace new "${{ env.WORKSPACE_NAME }}"
 
       - name: Terraform Plan
-        working-directory: ${{ github.event.inputs.environment || 'env/204278-ls2/dev' }}
+        id: plan
+        working-directory: ${{ env.ENVIRONMENT_PATH }}
         run: |
-          set -x
-          TF_WORKSPACE=$(basename "${{ github.event.inputs.environment || 'env/204278-ls2/dev' }}")
-          terraform workspace select "$TF_WORKSPACE" || terraform workspace new "$TF_WORKSPACE"
-          terraform plan -out=tfplan -input=false
+          terraform plan -out=tfplan -input=false -no-color | tee plan_output.txt
+          echo "exitcode=$?" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Generate Plan Summary
+        id: plan-summary
+        working-directory: ${{ env.ENVIRONMENT_PATH }}
+        run: |
+          # Get the human-readable plan output
+          PLAN_OUTPUT=$(terraform show -no-color tfplan)
+          
+          # Save to file for artifact
+          echo "$PLAN_OUTPUT" > plan_readable.txt
+          
+          # Extract summary statistics
+          ADD=$(echo "$PLAN_OUTPUT" | grep -oP 'Plan: \K\d+(?= to add)' || echo "0")
+          CHANGE=$(echo "$PLAN_OUTPUT" | grep -oP '\d+(?= to change)' || echo "0")
+          DESTROY=$(echo "$PLAN_OUTPUT" | grep -oP '\d+(?= to destroy)' || echo "0")
+          
+          echo "add=$ADD" >> $GITHUB_OUTPUT
+          echo "change=$CHANGE" >> $GITHUB_OUTPUT
+          echo "destroy=$DESTROY" >> $GITHUB_OUTPUT
+          
+          # Truncate plan for comment if too large (GitHub has 65536 char limit)
+          if [ ${#PLAN_OUTPUT} -gt 60000 ]; then
+            PLAN_TRUNCATED=$(echo "$PLAN_OUTPUT" | head -c 60000)
+            echo "PLAN<<EOF" >> $GITHUB_OUTPUT
+            echo "$PLAN_TRUNCATED" >> $GITHUB_OUTPUT
+            echo -e "\n\n... (output truncated, see artifacts for full plan)" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "truncated=true" >> $GITHUB_OUTPUT
+          else
+            echo "PLAN<<EOF" >> $GITHUB_OUTPUT
+            echo "$PLAN_OUTPUT" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "truncated=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ env.WORKSPACE_NAME }}
+          path: |
+            ${{ env.ENVIRONMENT_PATH }}/tfplan
+            ${{ env.ENVIRONMENT_PATH }}/plan_readable.txt
+            ${{ env.ENVIRONMENT_PATH }}/plan_output.txt
+          retention-days: 30
+
+      - name: Comment PR with Plan
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            const plan = `${{ steps.plan-summary.outputs.PLAN }}`;
+            const add = '${{ steps.plan-summary.outputs.add }}';
+            const change = '${{ steps.plan-summary.outputs.change }}';
+            const destroy = '${{ steps.plan-summary.outputs.destroy }}';
+            const truncated = '${{ steps.plan-summary.outputs.truncated }}';
+            const workspace = '${{ env.WORKSPACE_NAME }}';
+            const envPath = '${{ env.ENVIRONMENT_PATH }}';
+            const initStatus = '${{ steps.init.outcome }}';
+            const planStatus = '${{ steps.plan.outcome }}';
+            
+            let statusEmoji = '✅';
+            if (planStatus === 'failure') {
+              statusEmoji = '❌';
+            } else if (destroy !== '0') {
+              statusEmoji = '⚠️';
+            }
+            
+            const output = `## ${statusEmoji} Terraform Plan - \`${workspace}\`
+            
+            **Environment:** \`${envPath}\`
+            **Terraform Version:** \`${{ env.TF_VERSION }}\`
+            
+            ### Plan Summary
+            
+            | Action | Count |
+            |--------|-------|
+            | ➕ Resources to Add | **${add}** |
+            | 🔄 Resources to Change | **${change}** |
+            | ❌ Resources to Destroy | **${destroy}** |
+            
+            **Init Status:** \`${initStatus}\`
+            **Plan Status:** \`${planStatus}\`
+            
+            <details><summary>📋 Click to view full plan output</summary>
+            
+            \`\`\`terraform
+            ${plan}
+            \`\`\`
+            
+            </details>
+            
+            ${truncated === 'true' ? '> ⚠️ **Note:** Plan output was truncated. Download the artifact for the complete plan.\n' : ''}
+            
+            ---
+            *Triggered by: @${{ github.actor }} | Workflow: \`${{ github.workflow }}\` | Run: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*`;
+            
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes(`Terraform Plan - \`${workspace}\``)
+            );
+            
+            // Update existing comment or create new one
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: output
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: output
+              });
+            }
+
+      - name: Create Job Summary
+        if: always()
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          # Terraform Plan Results
+          
+          **Environment:** \`${{ env.ENVIRONMENT_PATH }}\`
+          **Workspace:** \`${{ env.WORKSPACE_NAME }}\`
+          **Terraform Version:** \`${{ env.TF_VERSION }}\`
+          
+          ## Summary
+          - ➕ Add: **${{ steps.plan-summary.outputs.add }}**
+          - 🔄 Change: **${{ steps.plan-summary.outputs.change }}**
+          - ❌ Destroy: **${{ steps.plan-summary.outputs.destroy }}**
+          
+          ## Status
+          - Init: \`${{ steps.init.outcome }}\`
+          - Plan: \`${{ steps.plan.outcome }}\`
+          
+          [View full plan in artifacts](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          EOF
+
+      - name: Check Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: |
+          echo "::error::Terraform plan failed"
+          exit 1

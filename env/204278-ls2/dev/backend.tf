@@ -3,7 +3,7 @@ terraform {
         hostname = "trialviki.jfrog.io"
         organization = "terraform-backend"
         workspaces {
-            prefix = "my-prefix-"
+            prefix = "osp-sre-dd-"
         }
     }
 }
