@@ -22,26 +22,6 @@ module "service_a_monitors" {
   ]
 }
 
-# Microservice A - Synthetic Test
-module "service_a_synthetic" {
-  source = "../../../modules/datadog-synthetics"
-
-  service_name         = "microservice-a"
-  environment          = var.environment
-  url                  = "https://dev.product-a.com/api/v1/health"
-  notification_channel = var.notification_channel
-
-  expected_status_code      = 200
-  response_time_threshold   = 2000
-  check_interval            = 300
-  locations                 = ["aws:us-east-1", "aws:us-west-2"]
-
-  tags = [
-    "product:${var.product}",
-    "team:api"
-  ]
-}
-
 # Microservice B - Base Monitors
 module "service_b_monitors" {
   source = "../../../modules/datadog-base-monitor"
@@ -57,20 +37,5 @@ module "service_b_monitors" {
     "product:${var.product}",
     "team:platform",
     "criticality:medium"
-  ]
-}
-
-# Microservice B - Synthetic Test
-module "service_b_synthetic" {
-  source = "../../../modules/datadog-synthetics"
-
-  service_name         = "microservice-b"
-  environment          = var.environment
-  url                  = "https://dev.product-a.com/platform/health"
-  notification_channel = var.notification_channel
-
-  tags = [
-    "product:${var.product}",
-    "team:platform"
   ]
 }
