@@ -15,7 +15,7 @@ on:
 env:
   TF_VERSION: '1.5.7'
   ENVIRONMENT_PATH: ${{ github.event.inputs.environment || 'env/204278-ls2/dev' }}
-  datadogog_api_key: ${{ secrets.DATADOG_API_KEY }}
+  datadog_api_key: ${{ secrets.DATADOG_API_KEY }}
   datadog_app_key: ${{ secrets.DATADOG_APP_KEY }}
 
 jobs:
