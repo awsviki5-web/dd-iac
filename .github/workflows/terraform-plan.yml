@@ -55,6 +55,8 @@ jobs:
       - name: Terraform Init
         id: init
         working-directory: ${{ env.ENVIRONMENT_PATH }}
+        env:
+          TF_WORKSPACE: ${{ env.WORKSPACE_NAME }}
         run: terraform init -reconfigure
         continue-on-error: true
 
