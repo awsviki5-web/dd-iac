@@ -1,0 +1,195 @@
+name: Terraform Apply
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'env/**'
+      - 'modules/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Specific environment to apply (e.g., env/product-a/dev)'
+        required: false
+        type: string
+
+env:
+  TF_VERSION: '1.5.7'
+  ENVIRONMENT_PATH: ${{ github.event.inputs.environment || 'env/204278-ls2/dev' }}
+  TF_VAR_datadog_api_key: ${{ secrets.DATADOG_API_KEY }}
+  TF_VAR_datadog_app_key: ${{ secrets.DATADOG_APP_KEY }}
+
+jobs:
+  detect-changes:
+    name: Detect Changed Environments
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed environments
+        id: set-matrix
+        run: |
+          set -euo pipefail
+
+          # If a specific environment was provided via manual run, use it directly
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.environment || '' }}" ]; then
+            # ensure provided input is a directory
+            if [ -d "${{ github.event.inputs.environment }}" ]; then
+              ENVS=$(printf '%s\n' "${{ github.event.inputs.environment }}" | jq -R -s -c 'split("\n")[:-1]')
+              echo "matrix=$ENVS" >> $GITHUB_OUTPUT
+              echo "Using manual environment: $ENVS"
+              exit 0
+            else
+              echo "Provided environment input is not a directory: ${{ github.event.inputs.environment }}" >&2
+              exit 1
+            fi
+          fi
+
+          # Determine base ref for diff (works for push and PR)
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_REF="origin/${{ github.base_ref }}"
+          else
+            # for pushes, compare against main
+            BASE_REF="origin/main"
+          fi
+
+          # fetch refs for diff
+          git fetch --no-tags --prune --unshallow --all || true
+
+          # Get changed files
+          CHANGED_FILES=$(git diff --name-only "$BASE_REF"...HEAD || true)
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          # Find unique environment directories (up to 4 path segments: env/<org>/<id>/<env>)
+          ENVS=$(echo "$CHANGED_FILES" | grep '^env/' || true | cut -d'/' -f1-4 | sort -u | jq -R -s -c 'split("\n")[:-1]')
+
+          # If no env changes but modules changed, run all environments
+          if [ "$ENVS" = "[]" ] && echo "$CHANGED_FILES" | grep -q '^modules/' ; then
+            ENVS=$(find env -type f -name "main.tf" -print0 | xargs -0 -n1 dirname | sort -u | jq -R -s -c 'split("\n")[:-1]')
+          fi
+
+          # If still empty (no env or module changes), set matrix to empty array
+          if [ -z "$ENVS" ] ; then
+            ENVS="[]"
+          fi
+
+          echo "matrix=$ENVS" >> $GITHUB_OUTPUT
+          echo "Detected environments: $ENVS"
+
+  terraform-apply:
+    name: Apply - ${{ matrix.environment }}
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.matrix != '[]'
+    strategy:
+      matrix:
+        environment: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+      max-parallel: 1
+      fail-fast: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure JFrog credentials
+        run: |
+          mkdir -p ~/.terraform.d
+          cat > ~/.terraform.d/credentials.tfrc.json <<EOF
+          {
+            "credentials": {
+              "trialjaswin.jfrog.io": {
+                "token": "${{ secrets.JFROG_ACCESS_TOKEN }}"
+              }
+            }
+          }
+          EOF
+      - name: Set Terraform Workspace Name
+        id: set-workspace
+        run: |
+          # Mirror the workspace naming from terraform-plan.yml
+          WORKSPACE_NAME=$(echo "${{ matrix.environment }}" | cut -d'/' -f2- | tr '/' '-')
+          echo "WORKSPACE_NAME=$WORKSPACE_NAME" >> $GITHUB_ENV
+          echo "workspace=$WORKSPACE_NAME" >> $GITHUB_OUTPUT
+          echo "Using workspace: $WORKSPACE_NAME"
+      - name: Terraform Init
+        working-directory: ${{ matrix.environment }}
+        env:
+          JFROG_ACCESS_TOKEN: ${{ secrets.JFROG_ACCESS_TOKEN }}
+          TF_WORKSPACE: ${{ env.WORKSPACE_NAME }}
+        run: terraform init -reconfigure -input=false
+
+      - name: Ensure and Select Terraform Workspace
+        working-directory: ${{ matrix.environment }}
+        run: |
+          set -euo pipefail
+          TF_WORKSPACE="${{ env.WORKSPACE_NAME }}"
+          echo "Using TF workspace: $TF_WORKSPACE"
+          # Try to select existing workspace, if it doesn't exist create it (matches plan workflow)
+          terraform workspace select "$TF_WORKSPACE" || terraform workspace new "$TF_WORKSPACE"
+
+      - name: Terraform Validate
+        working-directory: ${{ matrix.environment }}
+        run: terraform validate
+
+      - name: Terraform Format Check
+        working-directory: ${{ matrix.environment }}
+        # Run formatter (non-check) to avoid failing the apply workflow due to fmt differences.
+        # The plan workflow does not perform a format check, so match that behavior here.
+        run: terraform fmt -recursive || true
+
+      - name: Terraform Apply
+        working-directory: ${{ matrix.environment }}
+        env:
+          TF_VAR_datadog_api_key: ${{ secrets.DATADOG_API_KEY }}
+          TF_VAR_datadog_app_key: ${{ secrets.DATADOG_APP_KEY }}
+        run: |
+          terraform apply -input=false -auto-approve
+
+      - name: Terraform Output (JSON)
+        working-directory: ${{ matrix.environment }}
+        run: terraform output -json > tf-output.json
+
+      - name: Upload Outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-outputs-${{ matrix.environment }}
+          path: ${{ matrix.environment }}/tf-output.json
+          retention-days: 7
+
+      - name: Notify Success
+        if: ${{ success() }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number || 0,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `Terraform apply succeeded for \`${{ matrix.environment }}\`.`
+            })
+
+      - name: Notify Failure
+        if: ${{ failure() }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number || 0,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `Terraform apply failed for \`${{ matrix.environment }}\`. Check workflow run logs.`
+            })

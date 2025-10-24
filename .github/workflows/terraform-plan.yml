@@ -37,7 +37,7 @@ jobs:
           cat > ~/.terraform.d/credentials.tfrc.json <<EOF
           {
             "credentials": {
-              "trialviki.jfrog.io": {
+              "trialjaswin.jfrog.io": {
                 "token": "${{ secrets.JFROG_ACCESS_TOKEN }}"
               }
             }
