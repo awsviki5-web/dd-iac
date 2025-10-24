@@ -10,7 +10,7 @@ module "service_a_monitors" {
   cpu_threshold_warning     = 74
   memory_threshold_critical = 85
   memory_threshold_warning  = 70
-  error_rate_threshold_critical = 5
+  error_rate_threshold_critical = 6
   error_rate_threshold_warning  = 2
   latency_threshold_critical    = 1000
   latency_threshold_warning     = 500

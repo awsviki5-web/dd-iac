@@ -108,11 +108,45 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      - name: Configure JFrog credentials
+        run: |
+          mkdir -p ~/.terraform.d
+          cat > ~/.terraform.d/credentials.tfrc.json <<EOF
+          {
+            "credentials": {
+              "trialjaswin.jfrog.io": {
+                "token": "${{ secrets.JFROG_ACCESS_TOKEN }}"
+              }
+            }
+          }
+          EOF
+
+      - name: Set Terraform Workspace Name
+        id: set-workspace
+        run: |
+          WORKSPACE_NAME=$(echo "${{ matrix.environment }}" | cut -d'/' -f2- | tr '/' '-')
+          echo "WORKSPACE_NAME=$WORKSPACE_NAME" >> $GITHUB_ENV
+          echo "workspace=$WORKSPACE_NAME" >> $GITHUB_OUTPUT
+          echo "Using workspace: $WORKSPACE_NAME"
+
+      - name: Select/Create Terraform Workspace
+        run: |
+          set -euo pipefail
+          ENV_NAME=$(basename "${{ matrix.environment }}")
+          echo "🧩 Using Terraform workspace: $ENV_NAME"
+          terraform workspace select "$ENV_NAME" 2>/dev/null || terraform workspace new "$ENV_NAME"
+
       - name: Terraform Init
+        env:
+          TF_WORKSPACE: ${{ env.WORKSPACE_NAME }}
         run: terraform init -input=false
 
       - name: Terraform Validate
+        env:
+          TF_WORKSPACE: ${{ env.WORKSPACE_NAME }}
         run: terraform validate
 
       - name: Terraform Apply
+        env:
+          TF_WORKSPACE: ${{ env.WORKSPACE_NAME }}
         run: terraform apply -auto-approve -input=false
