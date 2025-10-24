@@ -1,7 +1,7 @@
 {
   "pull_request": {
     "head": {
-      "ref": "develop"
+      "ref": "feature-branch"
     },
     "base": {
       "ref": "main"
