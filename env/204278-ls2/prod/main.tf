@@ -6,7 +6,7 @@ module "service_a_monitors" {
   environment          = var.environment
   notification_channel = var.notification_channel
 
-  cpu_threshold_critical    = 80
+  cpu_threshold_critical    = 85
   cpu_threshold_warning     = 70
   memory_threshold_critical = 85
   memory_threshold_warning  = 70

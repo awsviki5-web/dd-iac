@@ -30,7 +30,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0 # This performs a full clone, including all history
 
       - name: Detect changed environments
         id: set-matrix
@@ -59,8 +59,9 @@ jobs:
             BASE_REF="origin/main"
           fi
 
-          # fetch refs for diff
-          git fetch --no-tags --prune --unshallow --all || true
+          # NOTE: The redundant 'git fetch' command has been removed.
+          # The 'actions/checkout' step with 'fetch-depth: 0' already
+          # provides a full, unshallowed history.
 
           # Get changed files
           CHANGED_FILES=$(git diff --name-only "$BASE_REF"...HEAD || true)
@@ -82,6 +83,7 @@ jobs:
 
           echo "matrix=$ENVS" >> $GITHUB_OUTPUT
           echo "Detected environments: $ENVS"
+
 
   terraform-apply:
     name: Apply - ${{ matrix.environment }}
