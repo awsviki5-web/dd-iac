@@ -7,6 +7,10 @@ on:
     paths:
       - 'env/**'
       - 'modules/**'
+  pull_request:
+    paths:
+      - 'env/**'
+      - 'modules/**'
   workflow_dispatch:
     inputs:
       environment:
@@ -36,144 +40,79 @@ jobs:
         run: |
           set -euo pipefail
 
+          # --- Manual input ---
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.environment || '' }}" ]; then
             if [ -d "${{ github.event.inputs.environment }}" ]; then
               ENVS=$(printf '%s\n' "${{ github.event.inputs.environment }}" | jq -R -s -c 'split("\n")[:-1]')
               echo "matrix=$ENVS" >> $GITHUB_OUTPUT
-              echo "Using manual environment: $ENVS"
+              echo "✅ Manual environment selected: $ENVS"
               exit 0
             else
-              echo "Provided environment input is not a directory: ${{ github.event.inputs.environment }}" >&2
+              echo "❌ Invalid environment path: ${{ github.event.inputs.environment }}" >&2
               exit 1
             fi
           fi
 
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE_REF="origin/${{ github.event.pull_request.base.ref }}"
+          # --- Auto detect changed directories ---
+          echo "🔍 Detecting changes between commits..."
+          git fetch origin main --depth=2 || true
+
+          # For push events
+          if [ "${{ github.event_name }}" = "push" ]; then
+            DIFF_BASE="${{ github.event.before }}"
+            [ "$DIFF_BASE" = "0000000000000000000000000000000000000000" ] && DIFF_BASE="HEAD~1"
+            CHANGED=$(git diff --name-only "$DIFF_BASE" ${{ github.sha }} -- 'env/' 'modules/')
           else
-            BASE_REF="origin/main"
+            # For pull_request
+            CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...${{ github.head_ref }} -- 'env/' 'modules/')
           fi
 
-          CHANGED_FILES=$(git diff --name-only "$BASE_REF"...HEAD || true)
+          if [ -z "$CHANGED" ]; then
+            echo "No changes detected under env/ or modules/"
+            echo "matrix=[]" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           echo "Changed files:"
-          echo "$CHANGED_FILES"
+          echo "$CHANGED"
 
-          ENVS=$(echo "$CHANGED_FILES" | grep '^env/' || true | cut -d'/' -f1-4 | sort -u | jq -R -s -c 'split("\n")[:-1]')
-
-          if [ "$ENVS" = "[]" ] && echo "$CHANGED_FILES" | grep -q '^modules/' ; then
-            ENVS=$(find env -type f -name "main.tf" -print0 | xargs -0 -n1 dirname | sort -u | jq -R -s -c 'split("\n")[:-1]')
-          fi
-
-          if [ -z "$ENVS" ] ; then
-            ENVS="[]"
+          # Extract unique env subdirectories like env/product-a/dev
+          ENVS=$(echo "$CHANGED" | grep '^env/' | cut -d'/' -f1-3 | sort -u | jq -R -s -c 'split("\n")[:-1]')
+          if [ "$ENVS" = "[]" ]; then
+            echo "No environment directories changed. Skipping apply."
+            echo "matrix=[]" >> $GITHUB_OUTPUT
+            exit 0
           fi
 
           echo "matrix=$ENVS" >> $GITHUB_OUTPUT
-          echo "Detected environments: $ENVS"
+          echo "✅ Changed environments: $ENVS"
 
   terraform-apply:
-    name: Apply - ${{ matrix.environment }}
-    runs-on: ubuntu-latest
+    name: Terraform Apply
     needs: detect-changes
-    if: needs.detect-changes.outputs.matrix != '[]'
+    if: ${{ needs.detect-changes.outputs.matrix != '[]' }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         environment: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
-      max-parallel: 1
-      fail-fast: false
+    defaults:
+      run:
+        working-directory: ${{ matrix.environment }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Configure JFrog credentials
-        run: |
-          mkdir -p ~/.terraform.d
-          cat > ~/.terraform.d/credentials.tfrc.json <<EOF
-          {
-            "credentials": {
-              "trialjaswin.jfrog.io": {
-                "token": "${{ secrets.JFROG_ACCESS_TOKEN }}"
-              }
-            }
-          }
-          EOF
-      - name: Set Terraform Workspace Name
-        id: set-workspace
-        run: |
-          WORKSPACE_NAME=$(echo "${{ matrix.environment }}" | cut -d'/' -f2- | tr '/' '-')
-          echo "WORKSPACE_NAME=$WORKSPACE_NAME" >> $GITHUB_ENV
-          echo "workspace=$WORKSPACE_NAME" >> $GITHUB_OUTPUT
-          echo "Using workspace: $WORKSPACE_NAME"
       - name: Terraform Init
-        working-directory: ${{ matrix.environment }}
-        env:
-          JFROG_ACCESS_TOKEN: ${{ secrets.JFROG_ACCESS_TOKEN }}
-          TF_WORKSPACE: ${{ env.WORKSPACE_NAME }}
-        run: terraform init -reconfigure -input=false
-
-      - name: Ensure and Select Terraform Workspace
-        working-directory: ${{ matrix.environment }}
-        run: |
-          set -euo pipefail
-          TF_WORKSPACE="${{ env.WORKSPACE_NAME }}"
-          echo "Using TF workspace: $TF_WORKSPACE"
-          terraform workspace select "$TF_WORKSPACE" || terraform workspace new "$TF_WORKSPACE"
+        run: terraform init -input=false
 
       - name: Terraform Validate
-        working-directory: ${{ matrix.environment }}
         run: terraform validate
 
-      - name: Terraform Format Check
-        working-directory: ${{ matrix.environment }}
-        run: terraform fmt -recursive || true
-
       - name: Terraform Apply
-        working-directory: ${{ matrix.environment }}
-        env:
-          TF_VAR_datadog_api_key: ${{ secrets.DATADOG_API_KEY }}
-          TF_VAR_datadog_app_key: ${{ secrets.DATADOG_APP_KEY }}
-        run: |
-          terraform apply -input=false -auto-approve
-
-      - name: Terraform Output (JSON)
-        working-directory: ${{ matrix.environment }}
-        run: terraform output -json > tf-output.json
-
-      - name: Upload Outputs
-        uses: actions/upload-artifact@v4
-        with:
-          name: terraform-outputs-${{ matrix.environment }}
-          path: ${{ matrix.environment }}/tf-output.json
-          retention-days: 7
-
-      - name: Notify Success
-        if: ${{ success() }}
-        uses: actions/github-script@v7
-        with:
-          script: |
-            github.rest.issues.createComment({
-              issue_number: context.issue.number || 0,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `Terraform apply succeeded for \`${{ matrix.environment }}\`.`
-            })
-
-      - name: Notify Failure
-        if: ${{ failure() }}
-        uses: actions/github-script@v7
-        with:
-          script: |
-            github.rest.issues.createComment({
-              issue_number: context.issue.number || 0,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `Terraform apply failed for \`${{ matrix.environment }}\`. Check workflow run logs.`
-            })
+        run: terraform apply -auto-approve -input=false
