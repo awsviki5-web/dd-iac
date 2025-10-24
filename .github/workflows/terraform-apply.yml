@@ -139,7 +139,7 @@ jobs:
       - name: Terraform Init
         env:
           TF_WORKSPACE: ${{ env.WORKSPACE_NAME }}
-        run: terraform init -input=false
+        run: terraform init -input=false -reconfigure
 
       - name: Terraform Validate
         env:
